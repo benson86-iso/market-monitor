@@ -41,10 +41,10 @@ label{display:inline-flex;align-items:center;gap:4px}
 <div class="card"><table id="pt"><thead><tr><th data-k="s">幣種</th><th data-k="c3">3分鐘變化</th><th data-k="p">最新價</th><th data-k="h">1小時次數</th><th data-k="v">24h 成交額</th></tr></thead><tbody></tbody></table></div>
 
 <h2>持倉異動（1 小時）</h2>
-<div class="bar"><label><input type="checkbox" id="top30"> 顯示前 30 名</label><span class="muted">只計 24h 成交額高於門檻嘅合約</span> <span class="muted" id="oinote" style="color:#e0b050"></span></div>
+<div class="bar"><label><input type="checkbox" id="top30"> 顯示前 30 名</label><span class="muted">只計 24h 成交額高於門檻嘅合約</span> <div class="muted" style="width:100%">ⓘ 正成長次數 = 持倉量連續按小時上升嘅小時數（最多 12）；負成長次數 = 連續下降嘅小時數。數字越大，資金流入／流出越持續。</div> <span class="muted" id="oinote" style="color:#e0b050"></span></div>
 <div class="grid" style="margin-top:10px">
- <div class="card"><b>持倉增加最多</b><table id="oiu"><thead><tr><th>幣種</th><th>1h 變化</th><th>持倉</th><th>價格</th><th>24h 成交</th></tr></thead><tbody></tbody></table></div>
- <div class="card"><b>持倉減少最多</b><table id="oid"><thead><tr><th>幣種</th><th>1h 變化</th><th>持倉</th><th>價格</th><th>24h 成交</th></tr></thead><tbody></tbody></table></div>
+ <div class="card"><b>持倉增加最多</b><table id="oiu"><thead><tr><th>幣種</th><th data-k="oic">1h 變化 ⇅</th><th data-k="su" title="正成長次數 = 持倉量連續按小時上升嘅小時數（最多 12）；負成長次數 = 連續下降嘅小時數。數字越大，資金流入／流出越持續。">正成長次數 ⓘ⇅</th><th>持倉</th><th>價格</th><th>24h 成交</th></tr></thead><tbody></tbody></table></div>
+ <div class="card"><b>持倉減少最多</b><table id="oid"><thead><tr><th>幣種</th><th data-k="oic">1h 變化 ⇅</th><th data-k="sd" title="正成長次數 = 持倉量連續按小時上升嘅小時數（最多 12）；負成長次數 = 連續下降嘅小時數。數字越大，資金流入／流出越持續。">負成長次數 ⓘ⇅</th><th>持倉</th><th>價格</th><th>24h 成交</th></tr></thead><tbody></tbody></table></div>
 </div>
 
 <script>
@@ -67,6 +67,7 @@ const SRC={
   async closes(id){const d=await getJ(`${this.base}/fapi/v1/klines?symbol=${id}&interval=1m&limit=61`);return d.map(k=>+k[4])},
   async oi(id){const d=await getJ(`${this.base}/futures/data/openInterestHist?symbol=${id}&period=5m&limit=13`);
    if(d.length<13)return null;return[+d[d.length-1].sumOpenInterestValue,+d[0].sumOpenInterestValue]},
+  async oiHourly(id){const d=await getJ(`${this.base}/futures/data/openInterestHist?symbol=${id}&period=1h&limit=13`);return d.map(x=>+x.sumOpenInterestValue)},
   conc:5,gap:50,oiConc:3,oiGap:120
  },
  okx:{
@@ -87,7 +88,7 @@ function analyze(closes,th){ // returns {c3,h}
  for(let k=3;k<n;k++)if(Math.abs(closes[k]/closes[k-3]-1)*100>=th)h++;
  return{c3,h}}
 
-let state={rows:[],sortK:"c3",sortDesc:true,alerted:new Map(),busy:false,timer:null,src:null};
+let state={stk:new Map(),oiCur:null,oiSort:{oiu:"oic",oid:"oic"},rows:[],sortK:"c3",sortDesc:true,alerted:new Map(),busy:false,timer:null,src:null};
 
 async function refresh(){
  if(state.busy)return;state.busy=true;try{await doRefresh()}catch(e){showErr("出錯："+e.message)}finally{state.busy=false}}
@@ -104,23 +105,36 @@ async function doRefresh(){$("err").style.display="none";
  const prog=ph=>(d,n)=>{$("status").textContent=`載入${ph}：${d}/${n}（${lbl}）`};
  const old=new Map(state.src===name?state.rows.map(r=>[r.s,r]):[]);
  const cl=await pool(big,S.conc,t=>S.closes(t.id),S.gap,prog("價格"));
- state.rows=big.map((t,i)=>{const a=analyze(cl[i],th),o=old.get(t.s);return{...t,c3:a.c3,h:a.h,oi:o?o.oi:null,oic:o?o.oic:null}});
+ state.rows=big.map((t,i)=>{const a=analyze(cl[i],th),o=old.get(t.s);return{...t,c3:a.c3,h:a.h,oi:o?o.oi:null,oic:o?o.oic:null,su:o?o.su:null,sd:o?o.sd:null}});
  state.src=name;render();
  let ois=null;
  if(S.oi){ois=await pool(big,S.oiConc,t=>S.oi(t.id),S.oiGap,prog("持倉"));if(!ois.some(Boolean))ois=null}
  if(ois){state.oiNote="";state.rows.forEach((r,i)=>{const o=ois[i];if(o){r.oi=o[0];r.oic=o[1]?(o[0]/o[1]-1)*100:null}})}
  else{$("status").textContent="載入持倉…";let m=null;
-  try{m=S.oiAll?await S.oiAll():null}catch(e){}
+  try{m=S.oiAll?await S.oiAll():null}catch(e){}state.oiCur=m;
   if(m){const h=oiHist(name,m),now=Date.now();let base=h[0];for(const e of h)if(now-e.t>=60*60e3)base=e;
    const mins=Math.round((now-base.t)/60e3);state.oiNote=mins>=55?"":`持倉變化只係過去 ${mins} 分鐘（網頁要開住先可以累積到 1 小時）`;
    state.rows.forEach(r=>{const v=m.get(r.s),b=base.m[r.s];r.oi=v??null;r.oic=v&&b&&mins>0?(v/b-1)*100:null})}
   else state.oiNote="持倉數據載入失敗"}
+ // growth streaks (consecutive hourly OI rises/falls)
+ if(S.oiHourly){const now=Date.now(),need=state.rows.filter(r=>r.oi!=null&&r.v>=(+$("minv").value||0)*1e4&&(!state.stk.has(name+r.s)||now-state.stk.get(name+r.s).t>10*60e3));
+  const res=await pool(need,S.oiConc,r=>S.oiHourly(r.id),S.oiGap,prog("成長次數"));
+  need.forEach((r,i)=>{if(res[i]&&res[i].length)state.stk.set(name+r.s,{t:now,v:res[i]})});
+  state.rows.forEach(r=>{const c=state.stk.get(name+r.s);if(c){const st=streaks(c.v.concat(r.oi!=null?[r.oi]:[]));r.su=st[0];r.sd=st[1];r.sp=false}})}
+ else if(state.oiCur){const hh=oiHourly(name,state.oiCur),hrs=hh.length;
+  state.rows.forEach(r=>{const vals=hh.map(e=>e.m[r.s]).filter(x=>x!=null);if(r.oi!=null)vals.push(r.oi);const st=streaks(vals);r.su=st[0];r.sd=st[1];r.sp=hrs<13});
+  if(hrs<13)state.oiNote=(state.oiNote?state.oiNote+"；":"")+`成長次數只有 ${hrs} 小時數據（OKX 冇開放歷史，要網頁開住逐小時累積，最多 12）`}
  $("oinote").textContent=state.oiNote;
  render();checkAlerts(th);
  $("status").textContent=`最後更新：${new Date().toLocaleTimeString("zh-HK",{hour12:false})}（香港時間）· 數據源：${name==="binance"?"幣安 USDT-M":"OKX USDT 永續"} · ${big.length} 個合約 · 每 ${$("iv").value} 秒刷新`}
 
 function oiHist(name,m){const k="mon_oih_"+name,now=Date.now();let h=[];try{h=JSON.parse(localStorage.getItem(k)||"[]")}catch(e){}
  h=h.filter(e=>now-e.t<75*60e3);h.push({t:now,m:Object.fromEntries(m)});try{localStorage.setItem(k,JSON.stringify(h))}catch(e){h=h.slice(-15)}return h}
+function streaks(v){let u=0,d=0;for(let i=v.length-1;i>0&&u<12;i--){if(v[i]>v[i-1])u++;else break}
+ for(let i=v.length-1;i>0&&d<12;i--){if(v[i]<v[i-1])d++;else break}return[u,d]}
+function oiHourly(name,m){const k="mon_oihh_"+name,hr=Math.floor(Date.now()/3600e3);let h=[];try{h=JSON.parse(localStorage.getItem(k)||"[]")}catch(e){}
+ h=h.filter(e=>hr-e.hr<=13);if(!h.length||h[h.length-1].hr<hr)h.push({hr,m:Object.fromEntries(m)});
+ try{localStorage.setItem(k,JSON.stringify(h))}catch(e){}return h.filter(e=>e.hr<hr)}
 function showErr(m){$("err").textContent=m;$("err").style.display="block"}
 
 function render(){
@@ -132,9 +146,12 @@ function render(){
  $("pt").tBodies[0].innerHTML=r.length?r.map(x=>`<tr class="${state.alerted.get(x.s)>Date.now()-70e3?"new":""}"><td>${x.s}</td><td class="${cls(x.c3)}">${pct(x.c3)}</td><td>${px(x.p)}</td><td>${x.h}</td><td>${wan(x.v)}</td></tr>`).join("")
   :`<tr><td colspan="5" class="muted">而家冇合約 3 分鐘升跌達 ±${th}%</td></tr>`;
  const n=$("top30").checked?30:10,ol=state.rows.filter(x=>x.oic!=null&&x.v>=minv);
- const row=x=>`<tr><td>${x.s}</td><td class="${cls(x.oic)}">${pct(x.oic)}</td><td>${wan(x.oi)}</td><td>${px(x.p)}</td><td>${wan(x.v)}</td></tr>`;
- $("oiu").tBodies[0].innerHTML=[...ol].sort((a,b)=>b.oic-a.oic).slice(0,n).map(row).join("");
- $("oid").tBodies[0].innerHTML=[...ol].sort((a,b)=>a.oic-b.oic).slice(0,n).map(row).join("");
+ const row=(x,k)=>`<tr><td>${x.s}</td><td class="${cls(x.oic)}">${pct(x.oic)}</td><td>${x[k]==null?"-":x[k]+(x.sp?"*":"")}</td><td>${wan(x.oi)}</td><td>${px(x.p)}</td><td>${wan(x.v)}</td></tr>`;
+ const U=[...ol].sort((a,b)=>b.oic-a.oic).slice(0,n),D=[...ol].sort((a,b)=>a.oic-b.oic).slice(0,n);
+ if(state.oiSort.oiu==="su")U.sort((a,b)=>(b.su??-1)-(a.su??-1)||b.oic-a.oic);
+ if(state.oiSort.oid==="sd")D.sort((a,b)=>(b.sd??-1)-(a.sd??-1)||a.oic-b.oic);
+ $("oiu").tBodies[0].innerHTML=U.map(x=>row(x,"su")).join("");
+ $("oid").tBodies[0].innerHTML=D.map(x=>row(x,"sd")).join("");
  $("majors").innerHTML=["BTC","ETH"].map(s=>{const x=state.rows.find(y=>y.s===s);if(!x)return"";
   return`<div class="card"><b>${s}</b><table><tr><td>總持倉</td><td>${x.oi?wan(x.oi)+" U":"-"}</td></tr><tr><td>1小時持倉變化</td><td class="${cls(x.oic)}">${pct(x.oic)}</td></tr><tr><td>最新價</td><td>${px(x.p)}</td></tr><tr><td>3分鐘變化</td><td class="${cls(x.c3)}">${pct(x.c3)}</td></tr><tr><td>24h 成交額</td><td>${wan(x.v)} U</td></tr></table></div>`}).join("")}
 
@@ -150,6 +167,7 @@ function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)
  o.frequency.value=880;o.connect(g);g.connect(c.destination);g.gain.value=.15;o.start();o.stop(c.currentTime+.25)}catch(e){}}
 
 function schedule(){clearInterval(state.timer);state.timer=setInterval(refresh,Math.max(30,+$("iv").value||60)*1000)}
+["oiu","oid"].forEach(t=>document.querySelectorAll(`#${t} th[data-k]`).forEach(th=>th.onclick=()=>{state.oiSort[t]=th.dataset.k;render()}));
 document.querySelectorAll("#pt th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;state.sortDesc=state.sortK===k?!state.sortDesc:true;state.sortK=k;render()});
 ["th","minv","dir","top30"].forEach(id=>$(id).addEventListener("change",()=>{if(id==="th")refresh();else render()}));
 $("iv").onchange=schedule;$("src").onchange=refresh;$("now").onclick=refresh;
