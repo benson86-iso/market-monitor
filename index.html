@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-HK"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>合約市場異動監察</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<style>
+body{font-family:system-ui,"PingFang HK","Microsoft JhengHei",sans-serif;background:#0f1115;color:#e6e6e6;margin:0;padding:16px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:20px 0 8px}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:#181b22;padding:10px;border-radius:8px}
+label{font-size:13px;color:#aaa}input[type=number]{width:70px;background:#0f1115;color:#fff;border:1px solid #333;border-radius:4px;padding:3px}
+select,button{-webkit-appearance:none;appearance:none;background:#262a33;color:#fff;border:1px solid #333;border-radius:4px;padding:4px 8px;cursor:pointer}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:5px 8px;border-bottom:1px solid #222;text-align:right}
+th:first-child,td:first-child{text-align:left}th{color:#999;font-weight:500;cursor:pointer}
+.up{color:#16c784}.dn{color:#ea3943}.muted{color:#888;font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px}
+.card{background:#181b22;border-radius:8px;padding:12px}.err{background:#3a1518;color:#ffb4b4;padding:10px;border-radius:8px;margin-top:10px;display:none}
+.new{background:#24301f}
+.card{overflow-x:auto;-webkit-overflow-scrolling:touch}
+select,button,input{font-size:16px;min-height:36px}input[type=checkbox]{min-height:auto;width:20px;height:20px;vertical-align:middle}
+label{display:inline-flex;align-items:center;gap:4px}
+@media(max-width:700px){body{padding:10px}.grid{grid-template-columns:1fr}td,th{padding:6px 5px}}
+</style></head><body>
+<h1>合約市場異動監察</h1>
+<div class="muted" id="status">準備中…</div>
+<div class="err" id="err"></div>
+<div class="bar" style="margin-top:10px">
+ <label>數據源 <select id="src"><option value="binance">幣安 USDT-M</option><option value="okx">OKX（後備）</option></select></label>
+ <label><input type="checkbox" id="autofb" checked> 幣安連唔到自動轉 OKX</label>
+ <label>價格門檻 ±% <input type="number" id="th" value="3" step="0.5"></label>
+ <label>最低 24h 成交額（萬U）<input type="number" id="minv" value="500"></label>
+ <label>方向 <select id="dir"><option value="all">全部</option><option value="up">急升</option><option value="dn">急跌</option></select></label>
+ <label>刷新（秒）<input type="number" id="iv" value="60" min="30"></label>
+ <label><input type="checkbox" id="notify"> 通知 + 聲音</label>
+ <button id="now">立即刷新</button>
+</div>
+
+<h2>BTC / ETH 總持倉</h2>
+<div class="grid" id="majors"></div>
+
+<h2>價格異動（3 分鐘）</h2>
+<div class="muted">出現次數 = 過去 1 小時內，3 分鐘升跌達門檻嘅次數。按欄位標題排序。</div>
+<div class="card"><table id="pt"><thead><tr><th data-k="s">幣種</th><th data-k="c3">3分鐘變化</th><th data-k="p">最新價</th><th data-k="h">1小時次數</th><th data-k="v">24h 成交額</th></tr></thead><tbody></tbody></table></div>
+
+<h2>持倉異動（1 小時）</h2>
+<div class="bar"><label><input type="checkbox" id="top30"> 顯示前 30 名</label><span class="muted">只計 24h 成交額高於門檻嘅合約</span> <span class="muted" id="oinote" style="color:#e0b050"></span></div>
+<div class="grid" style="margin-top:10px">
+ <div class="card"><b>持倉增加最多</b><table id="oiu"><thead><tr><th>幣種</th><th>1h 變化</th><th>持倉</th><th>價格</th><th>24h 成交</th></tr></thead><tbody></tbody></table></div>
+ <div class="card"><b>持倉減少最多</b><table id="oid"><thead><tr><th>幣種</th><th>1h 變化</th><th>持倉</th><th>價格</th><th>24h 成交</th></tr></thead><tbody></tbody></table></div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const pct=x=>x==null?"-":(x>0?"+":"")+x.toFixed(2)+"%";
+const cls=x=>x>0?"up":x<0?"dn":"";
+const wan=u=>{const w=u/1e4;return w>=1e4?(w/1e4).toFixed(2)+" 億":Math.round(w).toLocaleString()+" 萬"};
+const px=x=>x>=1?x.toLocaleString(undefined,{maximumFractionDigits:4}):Number(x.toPrecision(4)).toString();
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function getJ(u){const ac=new AbortController(),tm=setTimeout(()=>ac.abort(),12000);let r;try{r=await fetch(u,{signal:ac.signal,cache:"no-store"})}catch(e){throw new Error(e.name==="AbortError"?"逾時":"網絡/CORS 錯誤")}finally{clearTimeout(tm)}if(r.status===451||r.status===403)throw new Error("HTTP "+r.status+"（地區限制）");if(!r.ok)throw new Error("HTTP "+r.status+" "+u);return r.json()}
+async function pool(items,n,fn,gap=0,prog){const out=new Array(items.length);let i=0,done=0;
+ await Promise.all(Array.from({length:n},async()=>{while(i<items.length){const k=i++;try{out[k]=await fn(items[k])}catch(e){out[k]=null}done++;if(prog&&done%5===0)prog(done,items.length);if(gap)await sleep(gap)}}));return out}
+
+// Each source: list() -> [{s,id,p,v}] (v = 24h USDT volume); closes(id) -> 1m closes oldest→newest (61); oi(id) -> [oiUsdNow, oiUsd1hAgo]
+const SRC={
+ binance:{
+  base:"https://fapi.binance.com",
+  async list(){const d=await getJ(this.base+"/fapi/v1/ticker/24hr");
+   return d.filter(t=>t.symbol.endsWith("USDT")).map(t=>({s:t.symbol.replace(/USDT$/,""),id:t.symbol,p:+t.lastPrice,v:+t.quoteVolume}))},
+  async closes(id){const d=await getJ(`${this.base}/fapi/v1/klines?symbol=${id}&interval=1m&limit=61`);return d.map(k=>+k[4])},
+  async oi(id){const d=await getJ(`${this.base}/futures/data/openInterestHist?symbol=${id}&period=5m&limit=13`);
+   if(d.length<13)return null;return[+d[d.length-1].sumOpenInterestValue,+d[0].sumOpenInterestValue]},
+  conc:5,gap:50,oiConc:3,oiGap:120
+ },
+ okx:{
+  base:"https://www.okx.com",
+  async list(){const d=(await getJ(this.base+"/api/v5/market/tickers?instType=SWAP")).data;
+   return d.filter(t=>t.instId.endsWith("-USDT-SWAP")).map(t=>({s:t.instId.split("-")[0],id:t.instId,p:+t.last,v:+t.volCcy24h*+t.last}))},
+  async closes(id){const d=(await getJ(`${this.base}/api/v5/market/candles?instId=${id}&bar=1m&limit=61`)).data;return d.map(k=>+k[4]).reverse()},
+  // rubik OI-history endpoint has no CORS headers, so use the CORS-enabled snapshot endpoint and track history locally
+  async oiAll(){const d=(await getJ(this.base+"/api/v5/public/open-interest?instType=SWAP")).data;const m=new Map();
+   d.filter(x=>x.instId.endsWith("-USDT-SWAP")).forEach(x=>m.set(x.instId.split("-")[0],+x.oiUsd));return m},
+  conc:4,gap:120,oiConc:2,oiGap:450
+ }
+};
+
+function analyze(closes,th){ // returns {c3,h}
+ if(!closes||closes.length<4)return{c3:null,h:0};const n=closes.length;
+ const c3=(closes[n-1]/closes[n-4]-1)*100;let h=0;
+ for(let k=3;k<n;k++)if(Math.abs(closes[k]/closes[k-3]-1)*100>=th)h++;
+ return{c3,h}}
+
+let state={rows:[],sortK:"c3",sortDesc:true,alerted:new Map(),busy:false,timer:null,src:null};
+
+async function refresh(){
+ if(state.busy)return;state.busy=true;try{await doRefresh()}catch(e){showErr("出錯："+e.message)}finally{state.busy=false}}
+async function doRefresh(){$("err").style.display="none";
+ const th=Math.abs(+$("th").value||3),minv=(+$("minv").value||0)*1e4;
+ let name=$("src").value,S=SRC[name],list;
+ try{list=await S.list()}catch(e){
+  if(name==="binance"&&$("autofb").checked){showErr("連唔到幣安（"+e.message+"）。可能係網絡或地區限制，已轉用 OKX 後備數據。");name="okx";S=SRC.okx;
+   try{list=await S.list()}catch(e2){showErr("幣安同 OKX 都連唔到："+e2.message);return}}
+  else{showErr("連唔到 "+name+"："+e.message+(name==="binance"?"（可剔選自動轉 OKX）":""));return}}
+ const big=list.filter(t=>t.v>=minv||t.s==="BTC"||t.s==="ETH");
+ $("status").textContent=`更新中…（${name==="binance"?"幣安":"OKX"}，${big.length}/${list.length} 個合約）`;
+ const lbl=name==="binance"?"幣安":"OKX";
+ const prog=ph=>(d,n)=>{$("status").textContent=`載入${ph}：${d}/${n}（${lbl}）`};
+ const old=new Map(state.src===name?state.rows.map(r=>[r.s,r]):[]);
+ const cl=await pool(big,S.conc,t=>S.closes(t.id),S.gap,prog("價格"));
+ state.rows=big.map((t,i)=>{const a=analyze(cl[i],th),o=old.get(t.s);return{...t,c3:a.c3,h:a.h,oi:o?o.oi:null,oic:o?o.oic:null}});
+ state.src=name;render();
+ let ois=null;
+ if(S.oi){ois=await pool(big,S.oiConc,t=>S.oi(t.id),S.oiGap,prog("持倉"));if(!ois.some(Boolean))ois=null}
+ if(ois){state.oiNote="";state.rows.forEach((r,i)=>{const o=ois[i];if(o){r.oi=o[0];r.oic=o[1]?(o[0]/o[1]-1)*100:null}})}
+ else{$("status").textContent="載入持倉…";let m=null;
+  try{m=S.oiAll?await S.oiAll():null}catch(e){}
+  if(m){const h=oiHist(name,m),now=Date.now();let base=h[0];for(const e of h)if(now-e.t>=60*60e3)base=e;
+   const mins=Math.round((now-base.t)/60e3);state.oiNote=mins>=55?"":`持倉變化只係過去 ${mins} 分鐘（網頁要開住先可以累積到 1 小時）`;
+   state.rows.forEach(r=>{const v=m.get(r.s),b=base.m[r.s];r.oi=v??null;r.oic=v&&b&&mins>0?(v/b-1)*100:null})}
+  else state.oiNote="持倉數據載入失敗"}
+ $("oinote").textContent=state.oiNote;
+ render();checkAlerts(th);
+ $("status").textContent=`最後更新：${new Date().toLocaleTimeString("zh-HK",{hour12:false})}（香港時間）· 數據源：${name==="binance"?"幣安 USDT-M":"OKX USDT 永續"} · ${big.length} 個合約 · 每 ${$("iv").value} 秒刷新`}
+
+function oiHist(name,m){const k="mon_oih_"+name,now=Date.now();let h=[];try{h=JSON.parse(localStorage.getItem(k)||"[]")}catch(e){}
+ h=h.filter(e=>now-e.t<75*60e3);h.push({t:now,m:Object.fromEntries(m)});try{localStorage.setItem(k,JSON.stringify(h))}catch(e){h=h.slice(-15)}return h}
+function showErr(m){$("err").textContent=m;$("err").style.display="block"}
+
+function render(){
+ const th=Math.abs(+$("th").value||3),minv=(+$("minv").value||0)*1e4,dir=$("dir").value;
+ let r=state.rows.filter(x=>x.c3!=null&&Math.abs(x.c3)>=th&&x.v>=minv);
+ if(dir==="up")r=r.filter(x=>x.c3>0);if(dir==="dn")r=r.filter(x=>x.c3<0);
+ const k=state.sortK,sg=state.sortDesc?-1:1;
+ r.sort((a,b)=>k==="s"?sg*-a.s.localeCompare(b.s):k==="c3"?sg*(Math.abs(a.c3)-Math.abs(b.c3)):sg*(a[k]-b[k]));
+ $("pt").tBodies[0].innerHTML=r.length?r.map(x=>`<tr class="${state.alerted.get(x.s)>Date.now()-70e3?"new":""}"><td>${x.s}</td><td class="${cls(x.c3)}">${pct(x.c3)}</td><td>${px(x.p)}</td><td>${x.h}</td><td>${wan(x.v)}</td></tr>`).join("")
+  :`<tr><td colspan="5" class="muted">而家冇合約 3 分鐘升跌達 ±${th}%</td></tr>`;
+ const n=$("top30").checked?30:10,ol=state.rows.filter(x=>x.oic!=null&&x.v>=minv);
+ const row=x=>`<tr><td>${x.s}</td><td class="${cls(x.oic)}">${pct(x.oic)}</td><td>${wan(x.oi)}</td><td>${px(x.p)}</td><td>${wan(x.v)}</td></tr>`;
+ $("oiu").tBodies[0].innerHTML=[...ol].sort((a,b)=>b.oic-a.oic).slice(0,n).map(row).join("");
+ $("oid").tBodies[0].innerHTML=[...ol].sort((a,b)=>a.oic-b.oic).slice(0,n).map(row).join("");
+ $("majors").innerHTML=["BTC","ETH"].map(s=>{const x=state.rows.find(y=>y.s===s);if(!x)return"";
+  return`<div class="card"><b>${s}</b><table><tr><td>總持倉</td><td>${x.oi?wan(x.oi)+" U":"-"}</td></tr><tr><td>1小時持倉變化</td><td class="${cls(x.oic)}">${pct(x.oic)}</td></tr><tr><td>最新價</td><td>${px(x.p)}</td></tr><tr><td>3分鐘變化</td><td class="${cls(x.c3)}">${pct(x.c3)}</td></tr><tr><td>24h 成交額</td><td>${wan(x.v)} U</td></tr></table></div>`}).join("")}
+
+function checkAlerts(th){
+ const minv=(+$("minv").value||0)*1e4,now=Date.now(),fresh=[];
+ for(const x of state.rows){if(x.c3==null||Math.abs(x.c3)<th||x.v<minv)continue;
+  const last=state.alerted.get(x.s)||0;if(now-last>5*60e3){fresh.push(x);state.alerted.set(x.s,now)}}
+ if(!fresh.length||!$("notify").checked)return;render();
+ beep();const msg=fresh.slice(0,5).map(x=>`${x.s} ${pct(x.c3)}`).join("、");
+ if("Notification"in window&&Notification.permission==="granted")try{new Notification("價格異動",{body:msg})}catch(e){}}
+
+function beep(){try{const c=new (window.AudioContext||window.webkitAudioContext)(),o=c.createOscillator(),g=c.createGain();
+ o.frequency.value=880;o.connect(g);g.connect(c.destination);g.gain.value=.15;o.start();o.stop(c.currentTime+.25)}catch(e){}}
+
+function schedule(){clearInterval(state.timer);state.timer=setInterval(refresh,Math.max(30,+$("iv").value||60)*1000)}
+document.querySelectorAll("#pt th").forEach(th=>th.onclick=()=>{const k=th.dataset.k;state.sortDesc=state.sortK===k?!state.sortDesc:true;state.sortK=k;render()});
+["th","minv","dir","top30"].forEach(id=>$(id).addEventListener("change",()=>{if(id==="th")refresh();else render()}));
+$("iv").onchange=schedule;$("src").onchange=refresh;$("now").onclick=refresh;
+$("notify").onchange=()=>{if($("notify").checked&&"Notification"in window&&Notification.permission==="default")Notification.requestPermission()};
+// persist settings
+const KEYS=["src","th","minv","dir","iv"];KEYS.forEach(k=>{const v=localStorage.getItem("mon_"+k);if(v!=null)$(k).value=v;$(k).addEventListener("change",()=>localStorage.setItem("mon_"+k,$(k).value))});
+if(typeof module==="undefined"){refresh();schedule()}
+</script></body></html>
